@@ -10,9 +10,15 @@ Ensure you have the required dependencies installed:
 pip install opencv-python numpy
 ```
 
-## Usage
+## Features
 
-You can use the library for processing individual frames in real time, or for stabilizing a recorded video file.
+- **Real-Time Smoothing:** Process frames as they arrive (e.g. from a webcam).
+- **Video Processing:** Process entirely recorded videos.
+- **Configurable Complexity:** Adjust algorithm parameters (`low`, `medium`, `high`) based on the performance constraints of your application.
+- **ROI Tracking:** Choose a Region of Interest (ROI) to restrict feature detection to a specific, static part of the scene.
+- **Coordinate Mapping:** Click or select a point on the stabilized frame and get its true coordinates in the raw original frame.
+
+## Usage
 
 ### Example 1: Real-Time Frame Stabilization
 
@@ -61,4 +67,41 @@ output_video = "output_stabilized.mp4"
 print("Stabilizing video...")
 stabilize_video(input_video, output_video)
 print("Done!")
+```
+
+### Example 3: Advanced Configuration (Complexity, ROI, and Coordinate Mapping)
+
+You can pass `complexity` and `roi` when initializing the stabilizer. Using the `get_original_coordinates` method, you can also map any click or point on the stabilized video back to the original source video.
+
+```python
+import cv2
+from video_stabilizer import RealTimeVideoStabilizer
+
+# Initialize the stabilizer with advanced parameters
+# complexity can be 'low', 'medium', or 'high'.
+# roi is defined as (x, y, w, h)
+stabilizer = RealTimeVideoStabilizer(
+    smoothing_factor=0.1,
+    complexity='high',
+    roi=(100, 100, 400, 300)
+)
+
+# You can also change the ROI at runtime
+# stabilizer.set_roi((50, 50, 200, 200))
+
+cap = cv2.VideoCapture("input.mp4")
+ret, frame = cap.read()
+
+# Process frame to stabilize
+stabilized_frame = stabilizer.process_frame(frame)
+
+# Assume we click on the stabilized frame at coordinate (250, 250)
+stab_x, stab_y = 250, 250
+
+# Find where this point originated from in the original, jittery frame
+orig_x, orig_y = stabilizer.get_original_coordinates(stab_x, stab_y)
+
+print(f"Point ({stab_x}, {stab_y}) on the stabilized frame maps to ({orig_x:.2f}, {orig_y:.2f}) on the original frame.")
+
+cap.release()
 ```
