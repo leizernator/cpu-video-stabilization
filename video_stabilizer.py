@@ -4,13 +4,13 @@ import numpy as np
 class RealTimeVideoStabilizer:
     def __init__(self, smoothing_factor=0.1, complexity=5, roi=None):
         """
-        Real-time video stabilizer using optical flow and moving average.
+        Real-time video stabilizer using optical flow and Newtonian physics smoothing.
 
         Args:
-            smoothing_factor: A float between 0 and 1. Lower values mean more smoothing
-                              (slower adaptation to large camera movements, making the video
-                              appear more rigid). Higher values mean less smoothing (faster
-                              adaptation to camera movements).
+            smoothing_factor: A float between 0 and 1. Controls the stiffness of the
+                              tracking camera. Lower values mean more smoothing (slower
+                              adaptation to large camera movements, acting like a heavier mass).
+                              Higher values mean faster adaptation to camera movements.
             complexity: Algorithm complexity on a scale from 1 to 10. Higher values track
                         more features and use larger optical flow windows, improving
                         accuracy and robustness but increasing CPU/GPU processing overhead.
@@ -50,10 +50,15 @@ class RealTimeVideoStabilizer:
         self.y = 0.0
         self.a = 0.0 # angle
 
-        # Smoothed trajectory
+        # Smoothed trajectory (kinematic physics model)
         self.smoothed_x = 0.0
         self.smoothed_y = 0.0
         self.smoothed_a = 0.0
+
+        # Velocities for Newtonian smoothing (polynomial order 2)
+        self.vel_x = 0.0
+        self.vel_y = 0.0
+        self.vel_a = 0.0
 
         self.is_first_frame = True
 
@@ -161,12 +166,30 @@ class RealTimeVideoStabilizer:
         self.y += dy
         self.a += da
 
-        # Smooth trajectory using EMA (Exponential Moving Average)
-        # This acts as a low-pass filter, allowing large, slow movements
-        # but filtering out fast, small jitters.
-        self.smoothed_x = self.smoothing_factor * self.x + (1 - self.smoothing_factor) * self.smoothed_x
-        self.smoothed_y = self.smoothing_factor * self.y + (1 - self.smoothing_factor) * self.smoothed_y
-        self.smoothed_a = self.smoothing_factor * self.a + (1 - self.smoothing_factor) * self.smoothed_a
+        # Smooth trajectory using a critically damped Newtonian (mass-spring-damper) model
+        # This simulates acceleration (polynomial order 2) for smooth, continuous movement
+        # spring constant (k) defines how fast we want to pull towards the actual position.
+        # damping (c) is set to 2 * sqrt(k) for critical damping (no oscillation).
+
+        # Map smoothing factor (0 -> 1) to a spring constant
+        # higher smoothing = lower spring constant (loose spring, heavy smoothing)
+        k = max(0.001, (self.smoothing_factor) ** 2)
+        c = 2 * np.sqrt(k)
+
+        # Force/acceleration = spring_force - damping_force
+        accel_x = k * (self.x - self.smoothed_x) - c * self.vel_x
+        accel_y = k * (self.y - self.smoothed_y) - c * self.vel_y
+        accel_a = k * (self.a - self.smoothed_a) - c * self.vel_a
+
+        # Update velocities (Euler integration with dt=1)
+        self.vel_x += accel_x
+        self.vel_y += accel_y
+        self.vel_a += accel_a
+
+        # Update positions
+        self.smoothed_x += self.vel_x
+        self.smoothed_y += self.vel_y
+        self.smoothed_a += self.vel_a
 
         # Difference between smoothed trajectory and actual trajectory
         diff_x = self.smoothed_x - self.x
@@ -199,6 +222,22 @@ class RealTimeVideoStabilizer:
         self.prev_pts = curr_pts_good.reshape(-1, 1, 2)
 
         return stabilized_frame
+
+    def get_stabilized_coordinates(self, orig_x, orig_y):
+        """
+        Maps a point (orig_x, orig_y) from the original raw frame to the stabilized frame's coordinates.
+        Returns (stab_x, stab_y).
+        """
+        if self.current_M is None:
+            return float(orig_x), float(orig_y)
+
+        # Convert to homogeneous coordinate
+        pt = np.array([orig_x, orig_y, 1.0], dtype=np.float64)
+
+        # Apply forward transform
+        stab_pt = self.current_M.dot(pt)
+
+        return stab_pt[0], stab_pt[1]
 
     def get_original_coordinates(self, x, y):
         """

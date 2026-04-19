@@ -1,6 +1,6 @@
 # Real-Time Video Stabilizer
 
-This is a Python library for real-time video stabilization using OpenCV. It uses feature matching and optical flow to detect movement and applies an Exponential Moving Average (EMA) to smooth the trajectory. It is designed to remove camera jitter while smoothly following large, intentional movements.
+This is a Python library for real-time video stabilization using OpenCV. It uses feature matching and optical flow to detect movement and applies Newtonian physics (a critically damped polynomial-order-two kinematics model) to smooth the trajectory. It is designed to remove camera jitter while smoothly following large, intentional movements.
 
 ## Installation
 
@@ -14,14 +14,15 @@ pip install opencv-python numpy
 
 - **Real-Time Smoothing:** Process frames as they arrive (e.g. from a webcam).
 - **Video Processing:** Process entirely recorded videos.
-- **Smoothing Factor (0.0 to 1.0):** Controls how rigidly the camera is stabilized.
-    - Lower values mean more smoothing (slower adaptation to large camera movements).
-    - Higher values mean less smoothing (faster adaptation to large camera movements).
+- **Newtonian Kinematic Smoothing:** Tracks camera movements utilizing simulated mass, velocity, and acceleration to guarantee completely continuous movement free of jitter. The very first frame functions as the initial reference.
+- **Smoothing Factor (0.0 to 1.0):** Controls the stiffness of the tracking camera.
+    - Lower values mean more smoothing (slower adaptation to large camera movements, acting like a heavier mass).
+    - Higher values mean faster adaptation to camera movements.
 - **Configurable Complexity (1 to 10):** Adjust algorithm complexity on a scale from 1 to 10 based on the performance constraints of your application.
     - A higher value (e.g., 10) tracks more features and utilizes larger optical flow search windows, resulting in higher accuracy and robustness at the cost of higher CPU/GPU overhead.
     - Lower values (e.g., 1) process much faster but may lose tracking in low-texture environments.
 - **ROI Tracking:** Choose a Region of Interest `(x, y, w, h)` to restrict feature detection to a specific part of the scene. The default is `None`, which automatically utilizes the full image.
-- **Coordinate Mapping:** Click or select a point on the stabilized frame and get its true coordinates in the raw original frame.
+- **Coordinate Mapping:** Supports mapping points bidirectionally. You can map a point from the stabilized frame back to the original raw frame, or map a point from the original raw frame forward to where it currently sits on the stabilized frame.
 
 ## Usage
 
@@ -78,7 +79,7 @@ print("Done!")
 
 ### Example 3: Advanced Configuration (ROI and Coordinate Mapping)
 
-You can pass an `roi` when initializing the stabilizer. Using the `get_original_coordinates` method, you can also map any click or point on the stabilized video back to the original source video.
+You can pass an `roi` when initializing the stabilizer. Using the `get_original_coordinates` and `get_stabilized_coordinates` methods, you can map points between the original and stabilized streams in either direction.
 
 ```python
 import cv2
@@ -93,22 +94,23 @@ stabilizer = RealTimeVideoStabilizer(
     roi=(100, 100, 400, 300)
 )
 
-# You can also change the ROI dynamically at runtime
-# stabilizer.set_roi((50, 50, 200, 200))
-
 cap = cv2.VideoCapture("input.mp4")
 ret, frame = cap.read()
 
 # Process frame to stabilize
 stabilized_frame = stabilizer.process_frame(frame)
 
+# --- Backward Mapping ---
 # Assume we click on the stabilized frame at coordinate (250, 250)
 stab_x, stab_y = 250, 250
-
-# Find where this point originated from in the original, jittery frame
 orig_x, orig_y = stabilizer.get_original_coordinates(stab_x, stab_y)
-
 print(f"Point ({stab_x}, {stab_y}) on the stabilized frame maps to ({orig_x:.2f}, {orig_y:.2f}) on the original frame.")
+
+# --- Forward Mapping ---
+# Assume we track an object bounding box on the original frame at coordinate (150, 150)
+orig_x2, orig_y2 = 150, 150
+stab_x2, stab_y2 = stabilizer.get_stabilized_coordinates(orig_x2, orig_y2)
+print(f"Point ({orig_x2}, {orig_y2}) on the original frame maps to ({stab_x2:.2f}, {stab_y2:.2f}) on the stabilized frame.")
 
 cap.release()
 ```
