@@ -10,12 +10,17 @@ Ensure you have the required dependencies installed:
 pip install opencv-python numpy
 ```
 
-## Features
+## Features and Parameters
 
 - **Real-Time Smoothing:** Process frames as they arrive (e.g. from a webcam).
 - **Video Processing:** Process entirely recorded videos.
-- **Configurable Complexity:** Adjust algorithm parameters (`low`, `medium`, `high`) based on the performance constraints of your application.
-- **ROI Tracking:** Choose a Region of Interest (ROI) to restrict feature detection to a specific, static part of the scene.
+- **Smoothing Factor (0.0 to 1.0):** Controls how rigidly the camera is stabilized.
+    - Lower values mean more smoothing (slower adaptation to large camera movements).
+    - Higher values mean less smoothing (faster adaptation to large camera movements).
+- **Configurable Complexity (1 to 10):** Adjust algorithm complexity on a scale from 1 to 10 based on the performance constraints of your application.
+    - A higher value (e.g., 10) tracks more features and utilizes larger optical flow search windows, resulting in higher accuracy and robustness at the cost of higher CPU/GPU overhead.
+    - Lower values (e.g., 1) process much faster but may lose tracking in low-texture environments.
+- **ROI Tracking:** Choose a Region of Interest `(x, y, w, h)` to restrict feature detection to a specific part of the scene. The default is `None`, which automatically utilizes the full image.
 - **Coordinate Mapping:** Click or select a point on the stabilized frame and get its true coordinates in the raw original frame.
 
 ## Usage
@@ -32,8 +37,9 @@ from video_stabilizer import RealTimeVideoStabilizer
 cap = cv2.VideoCapture(0)
 
 # Initialize the stabilizer
-# smoothing_factor controls the smoothing (0 to 1). Lower = smoother (slower to adapt to large movements)
-stabilizer = RealTimeVideoStabilizer(smoothing_factor=0.1)
+# smoothing_factor: 0 to 1
+# complexity: 1 to 10
+stabilizer = RealTimeVideoStabilizer(smoothing_factor=0.1, complexity=5)
 
 while True:
     ret, frame = cap.read()
@@ -65,28 +71,29 @@ input_video = "input.mp4"
 output_video = "output_stabilized.mp4"
 
 print("Stabilizing video...")
-stabilize_video(input_video, output_video)
+# Process the video using a high smoothing factor and moderate complexity
+stabilize_video(input_video, output_video, smoothing_factor=0.15, complexity=6)
 print("Done!")
 ```
 
-### Example 3: Advanced Configuration (Complexity, ROI, and Coordinate Mapping)
+### Example 3: Advanced Configuration (ROI and Coordinate Mapping)
 
-You can pass `complexity` and `roi` when initializing the stabilizer. Using the `get_original_coordinates` method, you can also map any click or point on the stabilized video back to the original source video.
+You can pass an `roi` when initializing the stabilizer. Using the `get_original_coordinates` method, you can also map any click or point on the stabilized video back to the original source video.
 
 ```python
 import cv2
 from video_stabilizer import RealTimeVideoStabilizer
 
 # Initialize the stabilizer with advanced parameters
-# complexity can be 'low', 'medium', or 'high'.
-# roi is defined as (x, y, w, h)
+# complexity is set to 10 for maximum accuracy
+# roi is defined as (x, y, w, h). If None, it uses the full image.
 stabilizer = RealTimeVideoStabilizer(
     smoothing_factor=0.1,
-    complexity='high',
+    complexity=10,
     roi=(100, 100, 400, 300)
 )
 
-# You can also change the ROI at runtime
+# You can also change the ROI dynamically at runtime
 # stabilizer.set_roi((50, 50, 200, 200))
 
 cap = cv2.VideoCapture("input.mp4")

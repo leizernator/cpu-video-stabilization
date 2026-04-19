@@ -2,40 +2,45 @@ import cv2
 import numpy as np
 
 class RealTimeVideoStabilizer:
-    def __init__(self, smoothing_factor=0.1, complexity='medium', roi=None):
+    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None):
         """
         Real-time video stabilizer using optical flow and moving average.
 
         Args:
             smoothing_factor: A float between 0 and 1. Lower values mean more smoothing
-                              (slower adaptation to large camera movements).
-            complexity: Algorithm complexity ('low', 'medium', 'high'). Adjusts the number
-                        of features tracked and the optical flow window size.
+                              (slower adaptation to large camera movements, making the video
+                              appear more rigid). Higher values mean less smoothing (faster
+                              adaptation to camera movements).
+            complexity: Algorithm complexity on a scale from 1 to 10. Higher values track
+                        more features and use larger optical flow windows, improving
+                        accuracy and robustness but increasing CPU/GPU processing overhead.
             roi: Region of Interest to track features within, specified as (x, y, w, h).
-                 If None, the entire frame is used.
+                 If None, the default ROI is the full image (entire frame).
         """
-        self.smoothing_factor = smoothing_factor
+        self.smoothing_factor = max(0.0, min(1.0, float(smoothing_factor)))
         self.roi = roi
 
-        # Configure complexity parameters
-        if complexity == 'low':
-            self.max_corners = 100
-            self.quality_level = 0.05
-            self.min_distance = 30
-            self.lk_win_size = (15, 15)
-            self.lk_max_level = 2
-        elif complexity == 'high':
-            self.max_corners = 500
-            self.quality_level = 0.01
-            self.min_distance = 10
-            self.lk_win_size = (31, 31)
-            self.lk_max_level = 4
-        else: # 'medium' (default)
-            self.max_corners = 200
-            self.quality_level = 0.01
-            self.min_distance = 30
-            self.lk_win_size = (21, 21)
-            self.lk_max_level = 3
+        # Configure complexity parameters based on scale 1 to 10
+        complexity = max(1, min(10, int(complexity)))
+
+        # Linear interpolation mapped across the 1-10 range:
+        # max_corners: 50 -> 500
+        self.max_corners = int(50 + (complexity - 1) * (450 / 9))
+
+        # quality_level: 0.1 -> 0.01
+        self.quality_level = 0.1 - (complexity - 1) * (0.09 / 9)
+
+        # min_distance: 40 -> 10
+        self.min_distance = int(40 - (complexity - 1) * (30 / 9))
+
+        # lk_win_size: 11 -> 41 (must be odd numbers)
+        win_dim = int(11 + (complexity - 1) * (30 / 9))
+        if win_dim % 2 == 0:
+            win_dim += 1
+        self.lk_win_size = (win_dim, win_dim)
+
+        # lk_max_level: 1 -> 5
+        self.lk_max_level = int(1 + (complexity - 1) * (4 / 9))
 
         self.prev_gray = None
         self.prev_pts = None
@@ -215,7 +220,7 @@ class RealTimeVideoStabilizer:
 
         return orig_pt[0], orig_pt[1]
 
-def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity='medium', roi=None):
+def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None):
     """
     Receives a recorded video and saves a stabilized version of it.
     """
