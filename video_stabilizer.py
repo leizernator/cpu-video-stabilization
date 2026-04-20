@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 class RealTimeVideoStabilizer:
-    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi'):
+    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5):
         """
         Real-time video stabilizer using feature tracking and Kalman Filter dynamic modeling.
 
@@ -22,12 +22,16 @@ class RealTimeVideoStabilizer:
             extractor_type: 'shi_tomasi' (default, uses goodFeaturesToTrack + Lucas-Kanade optical flow)
                             or 'orb' (uses ORB descriptors + BFMatcher). 'orb' is much faster and
                             recommended for low-power edge devices like Raspberry Pi.
+            loss_threshold: A float between 0.0 and 1.0 (default 0.5) defining the percentage of
+                            initial features that can be lost before the algorithm triggers
+                            a full re-detection of features on the frame.
         """
         self.smoothing_factor = max(0.001, min(1.0, float(smoothing_factor)))
         self.roi = roi
         self.mask_frame = mask_frame
         self.debug = debug
         self.extractor_type = extractor_type
+        self.loss_threshold = max(0.01, min(1.0, float(loss_threshold)))
 
         # Configure complexity parameters based on scale 1 to 10
         complexity = max(1, min(10, int(complexity)))
@@ -164,8 +168,8 @@ class RealTimeVideoStabilizer:
         self.current_frame_shape = frame.shape[:2]
         self.current_M = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64)
 
-        # Prepare output frame
-        out_frame = frame.copy()
+        # Prepare output frame - only copy if debug is enabled to save significant CPU time
+        out_frame = frame.copy() if self.debug else frame
 
         if self.is_first_frame:
             self.prev_gray = curr_gray
@@ -180,7 +184,7 @@ class RealTimeVideoStabilizer:
             reinitialize = True
         else:
             current_count = len(self.prev_pts)
-            if current_count < 10 or current_count < (0.8 * self.initial_feature_count):
+            if current_count < 10 or current_count < ((1.0 - self.loss_threshold) * self.initial_feature_count):
                 reinitialize = True
 
         if reinitialize:
@@ -330,7 +334,7 @@ class RealTimeVideoStabilizer:
         orig_pt = inv_M.dot(pt)
         return orig_pt[0], orig_pt[1]
 
-def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi'):
+def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5):
     """
     Receives a recorded video and saves a stabilized version of it.
     """
@@ -357,7 +361,8 @@ def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5,
         roi=roi,
         mask_frame=mask_frame,
         debug=debug,
-        extractor_type=extractor_type
+        extractor_type=extractor_type,
+        loss_threshold=loss_threshold
     )
 
     while True:
