@@ -176,6 +176,28 @@ class RealTimeVideoStabilizer:
             self.prev_pts, self.prev_des = self._get_good_features(curr_gray)
             self.initial_feature_count = len(self.prev_pts) if self.prev_pts is not None else 0
             self.is_first_frame = False
+
+            # Draw mask overlay for first frame if debug
+            if self.debug:
+                mask = self._get_mask(curr_gray)
+                if mask is not None:
+                    red_overlay = np.zeros_like(out_frame)
+                    red_overlay[:, :] = [0, 0, 255]
+                    invalid_mask = cv2.bitwise_not(mask)
+                    alpha = 0.3
+                    out_float = out_frame.astype(np.float32)
+                    red_float = red_overlay.astype(np.float32)
+                    for c in range(3):
+                        out_float[:, :, c] = np.where(
+                            invalid_mask == 255,
+                            out_float[:, :, c] * (1 - alpha) + red_float[:, :, c] * alpha,
+                            out_float[:, :, c]
+                        )
+                    out_frame[:] = np.clip(out_float, 0, 255).astype(np.uint8)
+                if self.prev_pts is not None:
+                    for pt in self.prev_pts:
+                        x, y = pt.ravel()
+                        cv2.circle(out_frame, (int(x), int(y)), 3, (0, 255, 0), -1)
             return out_frame
 
         # Determine if we need to re-initialize due to low feature count (lost 20% of original features)
@@ -232,6 +254,30 @@ class RealTimeVideoStabilizer:
                 prev_pts_good = np.array([])
                 curr_pts_good = np.array([])
 
+        # Enforce mask actively during tracking
+        mask = self._get_mask(curr_gray)
+        if mask is not None and len(curr_pts_good) > 0:
+            valid_idx = []
+            for i, pt in enumerate(curr_pts_good):
+                x, y = pt.ravel()
+                x_int, y_int = int(x), int(y)
+                # Check if point is inside frame bounds
+                if 0 <= y_int < mask.shape[0] and 0 <= x_int < mask.shape[1]:
+                    # Check if point falls on a valid mask area (non-zero)
+                    if mask[y_int, x_int] > 0:
+                        valid_idx.append(i)
+
+            prev_pts_good = prev_pts_good[valid_idx]
+            curr_pts_good = curr_pts_good[valid_idx]
+
+            if self.extractor_type == 'orb' and curr_des is not None:
+                # We need to filter the active matched indices for ORB as well to maintain descriptor parity
+                filtered_matches = []
+                for idx in valid_idx:
+                    if idx < len(matches):
+                        filtered_matches.append(matches[idx])
+                matches = filtered_matches
+
         if len(prev_pts_good) < 10:
             self.prev_gray = curr_gray
             self.prev_pts, self.prev_des = self._get_good_features(curr_gray)
@@ -240,6 +286,34 @@ class RealTimeVideoStabilizer:
 
         # Draw features in debug mode
         if self.debug:
+            # Overlay semi-transparent red on masked-out (invalid) areas
+            mask = self._get_mask(curr_gray)
+            if mask is not None:
+                # Create a red overlay
+                red_overlay = np.zeros_like(out_frame)
+                red_overlay[:, :] = [0, 0, 255] # BGR red
+
+                # Apply where mask is 0 (invalid)
+                invalid_mask = cv2.bitwise_not(mask)
+
+                # Blend the red overlay with the original frame only in invalid areas
+                # alpha controls transparency
+                alpha = 0.3
+
+                # Create a float copy for accurate blending
+                out_float = out_frame.astype(np.float32)
+                red_float = red_overlay.astype(np.float32)
+
+                for c in range(3):
+                    out_float[:, :, c] = np.where(
+                        invalid_mask == 255,
+                        out_float[:, :, c] * (1 - alpha) + red_float[:, :, c] * alpha,
+                        out_float[:, :, c]
+                    )
+                out_frame[:] = np.clip(out_float, 0, 255).astype(np.uint8)
+
+
+            # Draw tracked points
             for pt in curr_pts_good:
                 x, y = pt.ravel()
                 cv2.circle(out_frame, (int(x), int(y)), 3, (0, 255, 0), -1)
