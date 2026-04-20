@@ -185,7 +185,8 @@ class RealTimeVideoStabilizer:
         # Draw features in debug mode
         if self.debug:
             for pt in curr_pts_good:
-                cv2.circle(out_frame, (int(pt[0]), int(pt[1])), 3, (0, 255, 0), -1)
+                x, y = pt.ravel()
+                cv2.circle(out_frame, (int(x), int(y)), 3, (0, 255, 0), -1)
 
         m, inliers = cv2.estimateAffinePartial2D(prev_pts_good, curr_pts_good)
 
