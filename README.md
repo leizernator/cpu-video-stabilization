@@ -1,6 +1,6 @@
 # Real-Time Video Stabilizer
 
-This is a Python library for real-time video stabilization using OpenCV. It uses feature matching and optical flow to detect movement and applies a **Kalman Filter dynamic model** to smooth the trajectory. It is designed to remove camera jitter entirely while smoothly following large, intentional movements.
+This is a Python library for real-time video stabilization using OpenCV. It uses feature matching (Optical Flow or ORB) to detect movement and applies a **Kalman Filter dynamic model** to smooth the trajectory. It is designed to remove camera jitter entirely while smoothly following large, intentional movements.
 
 ## Installation
 
@@ -15,6 +15,10 @@ pip install opencv-python numpy
 - **Real-Time Smoothing:** Process frames as they arrive (e.g. from a webcam).
 - **Video Processing:** Process entirely recorded videos.
 - **Kalman Filter Smoothing:** Utilizes a constant velocity Kalman Filter model to track and smooth the camera trajectory. This mathematically guarantees the elimination of jitter while maintaining real-time responsiveness.
+- **Extractor Type (`shi_tomasi` or `orb`):**
+    - `'shi_tomasi'` (default) utilizes `goodFeaturesToTrack` and Lucas-Kanade optical flow. Highly accurate but computationally expensive.
+    - `'orb'` uses Oriented FAST and Rotated BRIEF descriptors. Highly optimized, extremely fast, and highly recommended for edge devices like Raspberry Pi.
+- **Dynamic Feature Re-Detection:** The algorithm actively monitors tracking health. If the camera pans rapidly or orientation changes cause the algorithm to lose 20% of its initial tracking features, it proactively re-detects features on the current frame to maintain a high-quality tracking lock.
 - **Smoothing Factor (0.0 to 1.0):** Controls the measurement noise covariance of the Kalman Filter.
     - Lower values mean more smoothing (less trust in the jittery raw trajectory, acting like a heavier, smoother pan).
     - Higher values mean faster adaptation to camera movements.
@@ -27,9 +31,9 @@ pip install opencv-python numpy
 
 ## Usage
 
-### Example 1: Real-Time Frame Stabilization
+### Example 1: Real-Time Frame Stabilization on Edge Devices
 
-You can use the `RealTimeVideoStabilizer` class to stabilize frames as they arrive (e.g., from a webcam).
+You can use the `RealTimeVideoStabilizer` class with `extractor_type='orb'` to stabilize frames efficiently on low-power devices.
 
 ```python
 import cv2
@@ -41,7 +45,7 @@ cap = cv2.VideoCapture(0)
 # Initialize the stabilizer
 # smoothing_factor: 0 to 1
 # complexity: 1 to 10
-stabilizer = RealTimeVideoStabilizer(smoothing_factor=0.1, complexity=5)
+stabilizer = RealTimeVideoStabilizer(smoothing_factor=0.1, complexity=5, extractor_type='orb')
 
 while True:
     ret, frame = cap.read()
@@ -82,7 +86,8 @@ stabilize_video(
     smoothing_factor=0.15,
     complexity=6,
     mask_path=mask_image_path,
-    debug=True
+    debug=True,
+    extractor_type='shi_tomasi'
 )
 print("Done!")
 ```
@@ -101,7 +106,8 @@ from video_stabilizer import RealTimeVideoStabilizer
 stabilizer = RealTimeVideoStabilizer(
     smoothing_factor=0.1,
     complexity=10,
-    roi=(100, 100, 400, 300)
+    roi=(100, 100, 400, 300),
+    extractor_type='shi_tomasi'
 )
 
 cap = cv2.VideoCapture("input.mp4")

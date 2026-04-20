@@ -2,14 +2,14 @@ import cv2
 import numpy as np
 
 class RealTimeVideoStabilizer:
-    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False):
+    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi'):
         """
-        Real-time video stabilizer using optical flow and Kalman Filter dynamic modeling.
+        Real-time video stabilizer using feature tracking and Kalman Filter dynamic modeling.
 
         Args:
             smoothing_factor: A float between 0 and 1. Controls the measurement noise covariance
                               of the Kalman Filter. Lower values mean more smoothing (less trust
-                              in the jittery raw trajectory). Higher values mean less smoothing.
+                              in the raw trajectory). Higher values mean less smoothing.
             complexity: Algorithm complexity on a scale from 1 to 10. Higher values track
                         more features and use larger optical flow windows, improving
                         accuracy and robustness but increasing CPU/GPU processing overhead.
@@ -19,11 +19,15 @@ class RealTimeVideoStabilizer:
                         Pixels with a non-zero value are tracked. If the mask size does not match
                         the frame size, a ValueError will be raised during processing.
             debug: If True, draws the tracked feature points on the stabilized output frame.
+            extractor_type: 'shi_tomasi' (default, uses goodFeaturesToTrack + Lucas-Kanade optical flow)
+                            or 'orb' (uses ORB descriptors + BFMatcher). 'orb' is much faster and
+                            recommended for low-power edge devices like Raspberry Pi.
         """
         self.smoothing_factor = max(0.001, min(1.0, float(smoothing_factor)))
         self.roi = roi
         self.mask_frame = mask_frame
         self.debug = debug
+        self.extractor_type = extractor_type
 
         # Configure complexity parameters based on scale 1 to 10
         complexity = max(1, min(10, int(complexity)))
@@ -37,8 +41,17 @@ class RealTimeVideoStabilizer:
         self.lk_win_size = (win_dim, win_dim)
         self.lk_max_level = int(1 + (complexity - 1) * (4 / 9))
 
+        # ORB specific parameters
+        self.orb = None
+        self.bf_matcher = None
+        if self.extractor_type == 'orb':
+            self.orb = cv2.ORB_create(nfeatures=self.max_corners)
+            self.bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
         self.prev_gray = None
         self.prev_pts = None
+        self.prev_des = None # For ORB
+        self.initial_feature_count = 0
 
         # Cumulative transformations (trajectory)
         self.x = 0.0
@@ -104,26 +117,20 @@ class RealTimeVideoStabilizer:
         """
         self.mask_frame = mask_frame
         self.prev_pts = None
+        self.prev_des = None
+        self.initial_feature_count = 0
 
-    def _get_good_features(self, gray):
-        # Base mask handling
+    def _get_mask(self, gray):
         mask = None
-
         if self.mask_frame is not None:
-            # Check mask shape
             if self.mask_frame.shape[:2] != gray.shape[:2]:
                 raise ValueError(f"Mask frame shape {self.mask_frame.shape[:2]} does not match video frame shape {gray.shape[:2]}")
-
-            # Convert mask to grayscale if it's not already
             if len(self.mask_frame.shape) == 3:
                 mask = cv2.cvtColor(self.mask_frame, cv2.COLOR_BGR2GRAY)
             else:
                 mask = self.mask_frame.copy()
-
-            # Ensure it's a binary mask where non-zero is 255
             _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
         elif self.roi is not None:
-            # Use ROI if no mask frame is provided
             mask = np.zeros_like(gray)
             x, y, w, h = self.roi
             h_img, w_img = gray.shape
@@ -132,6 +139,17 @@ class RealTimeVideoStabilizer:
             w = max(0, min(w, w_img - x))
             h = max(0, min(h, h_img - y))
             mask[y:y+h, x:x+w] = 255
+        return mask
+
+    def _get_good_features(self, gray):
+        mask = self._get_mask(gray)
+
+        if self.extractor_type == 'orb':
+            kp, des = self.orb.detectAndCompute(gray, mask)
+            if kp is None or len(kp) == 0:
+                return None, None
+            pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
+            return pts, des
 
         pts = cv2.goodFeaturesToTrack(gray,
                                       maxCorners=self.max_corners,
@@ -139,7 +157,7 @@ class RealTimeVideoStabilizer:
                                       minDistance=self.min_distance,
                                       blockSize=3,
                                       mask=mask)
-        return pts
+        return pts, None
 
     def process_frame(self, frame):
         curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -151,35 +169,69 @@ class RealTimeVideoStabilizer:
 
         if self.is_first_frame:
             self.prev_gray = curr_gray
-            self.prev_pts = self._get_good_features(curr_gray)
+            self.prev_pts, self.prev_des = self._get_good_features(curr_gray)
+            self.initial_feature_count = len(self.prev_pts) if self.prev_pts is not None else 0
             self.is_first_frame = False
             return out_frame
 
-        if self.prev_pts is None or len(self.prev_pts) < 10:
-            self.prev_pts = self._get_good_features(self.prev_gray)
+        # Determine if we need to re-initialize due to low feature count (lost 20% of original features)
+        reinitialize = False
+        if self.prev_pts is None:
+            reinitialize = True
+        else:
+            current_count = len(self.prev_pts)
+            if current_count < 10 or current_count < (0.8 * self.initial_feature_count):
+                reinitialize = True
+
+        if reinitialize:
+            self.prev_pts, self.prev_des = self._get_good_features(self.prev_gray)
+            self.initial_feature_count = len(self.prev_pts) if self.prev_pts is not None else 0
 
         if self.prev_pts is None:
             self.prev_gray = curr_gray
             return out_frame
 
-        curr_pts, status, err = cv2.calcOpticalFlowPyrLK(
-            self.prev_gray, curr_gray, self.prev_pts, None,
-            winSize=self.lk_win_size,
-            maxLevel=self.lk_max_level,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
-        )
+        if self.extractor_type == 'orb':
+            mask = self._get_mask(curr_gray)
+            curr_kp, curr_des = self.orb.detectAndCompute(curr_gray, mask)
+            if curr_des is not None and self.prev_des is not None and len(curr_kp) > 0:
+                matches = self.bf_matcher.match(self.prev_des, curr_des)
+                matches = sorted(matches, key=lambda x: x.distance)
 
-        if curr_pts is not None and status is not None:
-            idx = np.where(status == 1)[0]
-            prev_pts_good = self.prev_pts[idx]
-            curr_pts_good = curr_pts[idx]
+                prev_pts_good = []
+                curr_pts_good = []
+
+                for m in matches:
+                    prev_pts_good.append(self.prev_pts[m.queryIdx][0])
+                    curr_pts_good.append(curr_kp[m.trainIdx].pt)
+
+                prev_pts_good = np.array(prev_pts_good, dtype=np.float32)
+                curr_pts_good = np.array(curr_pts_good, dtype=np.float32)
+                curr_pts = curr_pts_good.reshape(-1, 1, 2)
+            else:
+                prev_pts_good = np.array([])
+                curr_pts_good = np.array([])
+                curr_des = None
         else:
-            prev_pts_good = np.array([])
-            curr_pts_good = np.array([])
+            curr_pts, status, err = cv2.calcOpticalFlowPyrLK(
+                self.prev_gray, curr_gray, self.prev_pts, None,
+                winSize=self.lk_win_size,
+                maxLevel=self.lk_max_level,
+                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
+            )
+
+            if curr_pts is not None and status is not None:
+                idx = np.where(status == 1)[0]
+                prev_pts_good = self.prev_pts[idx]
+                curr_pts_good = curr_pts[idx]
+            else:
+                prev_pts_good = np.array([])
+                curr_pts_good = np.array([])
 
         if len(prev_pts_good) < 10:
             self.prev_gray = curr_gray
-            self.prev_pts = self._get_good_features(curr_gray)
+            self.prev_pts, self.prev_des = self._get_good_features(curr_gray)
+            self.initial_feature_count = len(self.prev_pts) if self.prev_pts is not None else 0
             return out_frame
 
         # Draw features in debug mode
@@ -191,9 +243,36 @@ class RealTimeVideoStabilizer:
         m, inliers = cv2.estimateAffinePartial2D(prev_pts_good, curr_pts_good)
 
         if m is None:
-            self.prev_pts = self._get_good_features(curr_gray)
+            self.prev_pts, self.prev_des = self._get_good_features(curr_gray)
+            self.initial_feature_count = len(self.prev_pts) if self.prev_pts is not None else 0
             self.prev_gray = curr_gray
             return out_frame
+
+        # Filter actively tracked points to only keep inliers determined by estimateAffinePartial2D
+        inliers_idx = np.where(inliers == 1)[0]
+        curr_pts_good = curr_pts_good[inliers_idx]
+
+        if self.extractor_type == 'orb' and curr_des is not None:
+            # We extract ONLY the inliers from the current keypoints and descriptors.
+            # This maintains tracking health state properly, so if points are lost,
+            # len(self.prev_pts) drops and triggers the 20% re-initialization.
+            matched_pts = []
+            matched_des = []
+
+            for m_idx in inliers_idx:
+                if m_idx < len(matches):
+                    train_idx = matches[m_idx].trainIdx
+                    matched_pts.append(curr_kp[train_idx].pt)
+                    matched_des.append(curr_des[train_idx])
+
+            if len(matched_pts) > 0:
+                self.prev_pts = np.array(matched_pts, dtype=np.float32).reshape(-1, 1, 2)
+                self.prev_des = np.array(matched_des, dtype=curr_des.dtype)
+            else:
+                self.prev_pts = curr_pts_good.reshape(-1, 1, 2)
+                self.prev_des = curr_des
+        else:
+            self.prev_pts = curr_pts_good.reshape(-1, 1, 2)
 
         dx = m[0, 2]
         dy = m[1, 2]
@@ -233,7 +312,6 @@ class RealTimeVideoStabilizer:
         stabilized_frame = cv2.warpAffine(out_frame, M, (w, h))
 
         self.prev_gray = curr_gray
-        self.prev_pts = curr_pts_good.reshape(-1, 1, 2)
 
         return stabilized_frame
 
@@ -252,7 +330,7 @@ class RealTimeVideoStabilizer:
         orig_pt = inv_M.dot(pt)
         return orig_pt[0], orig_pt[1]
 
-def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False):
+def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi'):
     """
     Receives a recorded video and saves a stabilized version of it.
     """
@@ -278,7 +356,8 @@ def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5,
         complexity=complexity,
         roi=roi,
         mask_frame=mask_frame,
-        debug=debug
+        debug=debug,
+        extractor_type=extractor_type
     )
 
     while True:
