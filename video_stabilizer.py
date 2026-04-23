@@ -38,8 +38,17 @@ class RealTimeVideoStabilizer:
 
         # Linear interpolation mapped across the 1-10 range:
         self.max_corners = int(50 + (complexity - 1) * (450 / 9))
-        self.quality_level = 0.1 - (complexity - 1) * (0.09 / 9)
-        self.min_distance = int(40 - (complexity - 1) * (30 / 9))
+
+        # Lock quality level practically to zero so we can aggressively find corners even in low contrast
+        self.quality_level = 0.0001
+        # Lock min distance low so we can find abundant corners, we will spread them manually
+        self.min_distance = 5
+
+        # Detect a massive surplus of corners before applying our spatial grid spread algorithm.
+        # This forces the detector to dig deep into low-quality corners, ensuring we get
+        # features on the low-contrast sides of the frame before we bucket-sort them.
+        self.detect_corners = self.max_corners * 20
+
         win_dim = int(11 + (complexity - 1) * (30 / 9))
         if win_dim % 2 == 0: win_dim += 1
         self.lk_win_size = (win_dim, win_dim)
@@ -49,7 +58,7 @@ class RealTimeVideoStabilizer:
         self.orb = None
         self.bf_matcher = None
         if self.extractor_type == 'orb':
-            self.orb = cv2.ORB_create(nfeatures=self.max_corners)
+            self.orb = cv2.ORB_create(nfeatures=self.detect_corners)
             self.bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
         self.prev_gray = None
@@ -147,21 +156,83 @@ class RealTimeVideoStabilizer:
 
     def _get_good_features(self, gray):
         mask = self._get_mask(gray)
+        h, w = gray.shape[:2]
 
-        if self.extractor_type == 'orb':
-            kp, des = self.orb.detectAndCompute(gray, mask)
-            if kp is None or len(kp) == 0:
-                return None, None
-            pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
-            return pts, des
+        grid_cols = 4
+        grid_rows = 4
+        cell_w = w // grid_cols
+        cell_h = h // grid_rows
 
-        pts = cv2.goodFeaturesToTrack(gray,
-                                      maxCorners=self.max_corners,
-                                      qualityLevel=self.quality_level,
-                                      minDistance=self.min_distance,
-                                      blockSize=3,
-                                      mask=mask)
-        return pts, None
+        # Calculate how many features we need per cell to hit the total target
+        target_per_cell = max(1, int(np.ceil(self.max_corners / (grid_cols * grid_rows))))
+
+        all_pts = []
+        all_des = []
+
+        for row in range(grid_rows):
+            for col in range(grid_cols):
+                x1 = col * cell_w
+                y1 = row * cell_h
+                x2 = w if col == grid_cols - 1 else (col + 1) * cell_w
+                y2 = h if row == grid_rows - 1 else (row + 1) * cell_h
+
+                cell_gray = gray[y1:y2, x1:x2]
+                cell_mask = mask[y1:y2, x1:x2] if mask is not None else None
+
+                if cell_mask is not None and cv2.countNonZero(cell_mask) == 0:
+                    continue
+
+                if self.extractor_type == 'orb':
+                    self.orb.setMaxFeatures(target_per_cell * 10)
+                    kp, des = self.orb.detectAndCompute(cell_gray, cell_mask)
+                    if kp is not None and len(kp) > 0:
+                        pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
+                        pts[:, 0, 0] += x1
+                        pts[:, 0, 1] += y1
+                        # We append all detected points in this cell as a distinct list
+                        # so we can round-robin pull from each cell at the end.
+                        all_pts.append(pts)
+                        all_des.append(des)
+                else:
+                    pts = cv2.goodFeaturesToTrack(
+                        cell_gray,
+                        maxCorners=target_per_cell * 2,
+                        qualityLevel=self.quality_level,
+                        minDistance=self.min_distance,
+                        blockSize=3,
+                        mask=cell_mask
+                    )
+                    if pts is not None and len(pts) > 0:
+                        pts[:, 0, 0] += x1
+                        pts[:, 0, 1] += y1
+                        all_pts.append(pts)
+
+        if len(all_pts) == 0:
+            return None, None
+
+        # Round-robin selection across all populated grid cells to ensure maximum spatial spread
+        selected_pts = []
+        selected_des = []
+        ptrs = [0] * len(all_pts)
+
+        while len(selected_pts) < self.max_corners:
+            added = False
+            for i in range(len(all_pts)):
+                if ptrs[i] < len(all_pts[i]):
+                    selected_pts.append(all_pts[i][ptrs[i]])
+                    if self.extractor_type == 'orb':
+                        selected_des.append(all_des[i][ptrs[i]])
+                    ptrs[i] += 1
+                    added = True
+                    if len(selected_pts) >= self.max_corners:
+                        break
+            if not added:
+                break # All cells exhausted
+
+        final_pts = np.array(selected_pts, dtype=np.float32)
+        final_des = np.array(selected_des, dtype=np.uint8) if self.extractor_type == 'orb' else None
+
+        return final_pts, final_des
 
     def process_frame(self, frame):
         curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
