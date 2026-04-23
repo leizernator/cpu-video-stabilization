@@ -18,7 +18,8 @@ pip install opencv-python numpy
 - **Extractor Type (`shi_tomasi` or `orb`):**
     - `'shi_tomasi'` (default) utilizes `goodFeaturesToTrack` and Lucas-Kanade optical flow. Highly accurate but computationally expensive.
     - `'orb'` uses Oriented FAST and Rotated BRIEF descriptors. Highly optimized, extremely fast, and highly recommended for edge devices like Raspberry Pi.
-- **Dynamic Feature Re-Detection:** The algorithm actively monitors tracking health. If the camera pans rapidly or orientation changes cause the algorithm to lose 20% of its initial tracking features, it proactively re-detects features on the current frame to maintain a high-quality tracking lock.
+- **Dynamic Feature Re-Detection:** The algorithm actively monitors tracking health. If the camera pans rapidly or orientation changes cause the algorithm to lose a certain percentage of its initial tracking features, it proactively re-detects features to maintain a high-quality tracking lock.
+- **Loss Threshold (0.0 to 1.0):** Controls the percentage of features that can be lost before re-detection triggers. The default is `0.5` (50% loss allowed). Set this lower (e.g. `0.2`) to force more frequent re-detections during aggressive panning.
 - **Smoothing Factor (0.0 to 1.0):** Controls the measurement noise covariance of the Kalman Filter.
     - Lower values mean more smoothing (less trust in the jittery raw trajectory, acting like a heavier, smoother pan).
     - Higher values mean faster adaptation to camera movements.
