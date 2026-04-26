@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 class RealTimeVideoStabilizer:
-    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5):
+    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1):
         """
         Real-time video stabilizer using feature tracking and Kalman Filter dynamic modeling.
 
@@ -25,6 +25,8 @@ class RealTimeVideoStabilizer:
             loss_threshold: A float between 0.0 and 1.0 (default 0.5) defining the percentage of
                             initial features that can be lost before the algorithm triggers
                             a full re-detection of features on the frame.
+            grid_size: An integer (default 1). If > 1, splits the frame into a `grid_size x grid_size`
+                       grid to search for features independently per tile. Helps spread features out.
         """
         self.smoothing_factor = max(0.001, min(1.0, float(smoothing_factor)))
         self.roi = roi
@@ -32,6 +34,7 @@ class RealTimeVideoStabilizer:
         self.debug = debug
         self.extractor_type = extractor_type
         self.loss_threshold = max(0.01, min(1.0, float(loss_threshold)))
+        self.grid_size = max(1, int(grid_size))
 
         # Configure complexity parameters based on scale 1 to 10
         complexity = max(1, min(10, int(complexity)))
@@ -39,16 +42,8 @@ class RealTimeVideoStabilizer:
         # Linear interpolation mapped across the 1-10 range:
         self.max_corners = int(50 + (complexity - 1) * (450 / 9))
 
-        # Lock quality level practically to zero so we can aggressively find corners even in low contrast
-        self.quality_level = 0.0001
-        # Lock min distance low so we can find abundant corners, we will spread them manually
-        self.min_distance = 5
-
-        # Detect a massive surplus of corners before applying our spatial grid spread algorithm.
-        # This forces the detector to dig deep into low-quality corners, ensuring we get
-        # features on the low-contrast sides of the frame before we bucket-sort them.
-        self.detect_corners = self.max_corners * 20
-
+        self.quality_level = 0.01
+        self.min_distance = 10
         win_dim = int(11 + (complexity - 1) * (30 / 9))
         if win_dim % 2 == 0: win_dim += 1
         self.lk_win_size = (win_dim, win_dim)
@@ -158,12 +153,33 @@ class RealTimeVideoStabilizer:
         mask = self._get_mask(gray)
         h, w = gray.shape[:2]
 
-        grid_cols = 4
-        grid_rows = 4
+        # If grid_size is 1, search the entire image normally.
+        if self.grid_size == 1:
+            if self.extractor_type == 'orb':
+                self.orb.setMaxFeatures(self.max_corners)
+                kp, des = self.orb.detectAndCompute(gray, mask)
+                if kp is None or len(kp) == 0:
+                    return None, None
+                pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
+                return pts, des
+            else:
+                pts = cv2.goodFeaturesToTrack(
+                    gray,
+                    maxCorners=self.max_corners,
+                    qualityLevel=self.quality_level,
+                    minDistance=self.min_distance,
+                    blockSize=3,
+                    mask=mask
+                )
+                return pts, None
+
+        # If grid_size > 1, divide into a grid and search tiles independently
+        grid_cols = self.grid_size
+        grid_rows = self.grid_size
         cell_w = w // grid_cols
         cell_h = h // grid_rows
 
-        # Calculate how many features we need per cell to hit the total target
+        # Calculate target per tile
         target_per_cell = max(1, int(np.ceil(self.max_corners / (grid_cols * grid_rows))))
 
         all_pts = []
@@ -183,20 +199,18 @@ class RealTimeVideoStabilizer:
                     continue
 
                 if self.extractor_type == 'orb':
-                    self.orb.setMaxFeatures(target_per_cell * 10)
+                    self.orb.setMaxFeatures(target_per_cell)
                     kp, des = self.orb.detectAndCompute(cell_gray, cell_mask)
                     if kp is not None and len(kp) > 0:
                         pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
                         pts[:, 0, 0] += x1
                         pts[:, 0, 1] += y1
-                        # We append all detected points in this cell as a distinct list
-                        # so we can round-robin pull from each cell at the end.
-                        all_pts.append(pts)
-                        all_des.append(des)
+                        all_pts.extend(pts)
+                        all_des.extend(des)
                 else:
                     pts = cv2.goodFeaturesToTrack(
                         cell_gray,
-                        maxCorners=target_per_cell * 2,
+                        maxCorners=target_per_cell,
                         qualityLevel=self.quality_level,
                         minDistance=self.min_distance,
                         blockSize=3,
@@ -205,32 +219,13 @@ class RealTimeVideoStabilizer:
                     if pts is not None and len(pts) > 0:
                         pts[:, 0, 0] += x1
                         pts[:, 0, 1] += y1
-                        all_pts.append(pts)
+                        all_pts.extend(pts)
 
         if len(all_pts) == 0:
             return None, None
 
-        # Round-robin selection across all populated grid cells to ensure maximum spatial spread
-        selected_pts = []
-        selected_des = []
-        ptrs = [0] * len(all_pts)
-
-        while len(selected_pts) < self.max_corners:
-            added = False
-            for i in range(len(all_pts)):
-                if ptrs[i] < len(all_pts[i]):
-                    selected_pts.append(all_pts[i][ptrs[i]])
-                    if self.extractor_type == 'orb':
-                        selected_des.append(all_des[i][ptrs[i]])
-                    ptrs[i] += 1
-                    added = True
-                    if len(selected_pts) >= self.max_corners:
-                        break
-            if not added:
-                break # All cells exhausted
-
-        final_pts = np.array(selected_pts, dtype=np.float32)
-        final_des = np.array(selected_des, dtype=np.uint8) if self.extractor_type == 'orb' else None
+        final_pts = np.array(all_pts, dtype=np.float32)
+        final_des = np.array(all_des, dtype=np.uint8) if self.extractor_type == 'orb' else None
 
         return final_pts, final_des
 
@@ -479,7 +474,7 @@ class RealTimeVideoStabilizer:
         orig_pt = inv_M.dot(pt)
         return orig_pt[0], orig_pt[1]
 
-def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5):
+def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1):
     """
     Receives a recorded video and saves a stabilized version of it.
     """
@@ -507,7 +502,8 @@ def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5,
         mask_frame=mask_frame,
         debug=debug,
         extractor_type=extractor_type,
-        loss_threshold=loss_threshold
+        loss_threshold=loss_threshold,
+        grid_size=grid_size
     )
 
     while True:
