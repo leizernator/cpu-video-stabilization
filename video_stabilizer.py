@@ -53,7 +53,7 @@ class RealTimeVideoStabilizer:
         self.orb = None
         self.bf_matcher = None
         if self.extractor_type == 'orb':
-            self.orb = cv2.ORB_create(nfeatures=self.detect_corners)
+            self.orb = cv2.ORB_create(nfeatures=self.max_corners)
             self.bf_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
         self.prev_gray = None
