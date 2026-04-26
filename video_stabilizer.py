@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 class RealTimeVideoStabilizer:
-    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5):
+    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1):
         """
         Real-time video stabilizer using feature tracking and Kalman Filter dynamic modeling.
 
@@ -25,6 +25,8 @@ class RealTimeVideoStabilizer:
             loss_threshold: A float between 0.0 and 1.0 (default 0.5) defining the percentage of
                             initial features that can be lost before the algorithm triggers
                             a full re-detection of features on the frame.
+            grid_size: An integer (default 1). If > 1, splits the frame into a `grid_size x grid_size`
+                       grid to search for features independently per tile. Helps spread features out.
         """
         self.smoothing_factor = max(0.001, min(1.0, float(smoothing_factor)))
         self.roi = roi
@@ -32,14 +34,16 @@ class RealTimeVideoStabilizer:
         self.debug = debug
         self.extractor_type = extractor_type
         self.loss_threshold = max(0.01, min(1.0, float(loss_threshold)))
+        self.grid_size = max(1, int(grid_size))
 
         # Configure complexity parameters based on scale 1 to 10
         complexity = max(1, min(10, int(complexity)))
 
         # Linear interpolation mapped across the 1-10 range:
         self.max_corners = int(50 + (complexity - 1) * (450 / 9))
-        self.quality_level = 0.1 - (complexity - 1) * (0.09 / 9)
-        self.min_distance = int(40 - (complexity - 1) * (30 / 9))
+
+        self.quality_level = 0.01
+        self.min_distance = 10
         win_dim = int(11 + (complexity - 1) * (30 / 9))
         if win_dim % 2 == 0: win_dim += 1
         self.lk_win_size = (win_dim, win_dim)
@@ -147,21 +151,83 @@ class RealTimeVideoStabilizer:
 
     def _get_good_features(self, gray):
         mask = self._get_mask(gray)
+        h, w = gray.shape[:2]
 
-        if self.extractor_type == 'orb':
-            kp, des = self.orb.detectAndCompute(gray, mask)
-            if kp is None or len(kp) == 0:
-                return None, None
-            pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
-            return pts, des
+        # If grid_size is 1, search the entire image normally.
+        if self.grid_size == 1:
+            if self.extractor_type == 'orb':
+                self.orb.setMaxFeatures(self.max_corners)
+                kp, des = self.orb.detectAndCompute(gray, mask)
+                if kp is None or len(kp) == 0:
+                    return None, None
+                pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
+                return pts, des
+            else:
+                pts = cv2.goodFeaturesToTrack(
+                    gray,
+                    maxCorners=self.max_corners,
+                    qualityLevel=self.quality_level,
+                    minDistance=self.min_distance,
+                    blockSize=3,
+                    mask=mask
+                )
+                return pts, None
 
-        pts = cv2.goodFeaturesToTrack(gray,
-                                      maxCorners=self.max_corners,
-                                      qualityLevel=self.quality_level,
-                                      minDistance=self.min_distance,
-                                      blockSize=3,
-                                      mask=mask)
-        return pts, None
+        # If grid_size > 1, divide into a grid and search tiles independently
+        grid_cols = self.grid_size
+        grid_rows = self.grid_size
+        cell_w = w // grid_cols
+        cell_h = h // grid_rows
+
+        # Calculate target per tile
+        target_per_cell = max(1, int(np.ceil(self.max_corners / (grid_cols * grid_rows))))
+
+        all_pts = []
+        all_des = []
+
+        for row in range(grid_rows):
+            for col in range(grid_cols):
+                x1 = col * cell_w
+                y1 = row * cell_h
+                x2 = w if col == grid_cols - 1 else (col + 1) * cell_w
+                y2 = h if row == grid_rows - 1 else (row + 1) * cell_h
+
+                cell_gray = gray[y1:y2, x1:x2]
+                cell_mask = mask[y1:y2, x1:x2] if mask is not None else None
+
+                if cell_mask is not None and cv2.countNonZero(cell_mask) == 0:
+                    continue
+
+                if self.extractor_type == 'orb':
+                    self.orb.setMaxFeatures(target_per_cell)
+                    kp, des = self.orb.detectAndCompute(cell_gray, cell_mask)
+                    if kp is not None and len(kp) > 0:
+                        pts = np.array([p.pt for p in kp], dtype=np.float32).reshape(-1, 1, 2)
+                        pts[:, 0, 0] += x1
+                        pts[:, 0, 1] += y1
+                        all_pts.extend(pts)
+                        all_des.extend(des)
+                else:
+                    pts = cv2.goodFeaturesToTrack(
+                        cell_gray,
+                        maxCorners=target_per_cell,
+                        qualityLevel=self.quality_level,
+                        minDistance=self.min_distance,
+                        blockSize=3,
+                        mask=cell_mask
+                    )
+                    if pts is not None and len(pts) > 0:
+                        pts[:, 0, 0] += x1
+                        pts[:, 0, 1] += y1
+                        all_pts.extend(pts)
+
+        if len(all_pts) == 0:
+            return None, None
+
+        final_pts = np.array(all_pts, dtype=np.float32)
+        final_des = np.array(all_des, dtype=np.uint8) if self.extractor_type == 'orb' else None
+
+        return final_pts, final_des
 
     def process_frame(self, frame):
         curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -408,7 +474,7 @@ class RealTimeVideoStabilizer:
         orig_pt = inv_M.dot(pt)
         return orig_pt[0], orig_pt[1]
 
-def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5):
+def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1):
     """
     Receives a recorded video and saves a stabilized version of it.
     """
@@ -436,7 +502,8 @@ def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5,
         mask_frame=mask_frame,
         debug=debug,
         extractor_type=extractor_type,
-        loss_threshold=loss_threshold
+        loss_threshold=loss_threshold,
+        grid_size=grid_size
     )
 
     while True:

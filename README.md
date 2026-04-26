@@ -25,6 +25,7 @@ pip install opencv-python numpy
     - Higher values mean faster adaptation to camera movements.
 - **Configurable Complexity (1 to 10):** Adjust algorithm complexity on a scale from 1 to 10.
     - Higher values track more features and utilize larger optical flow search windows, resulting in higher accuracy and robustness at the cost of higher CPU/GPU overhead.
+- **Grid Split Searching:** The `grid_size` parameter (default `1`) divides the camera frame into a `grid_size x grid_size` mathematical grid. The algorithm will process each tile independently to find a ceiling fraction of the total required complexity features per tile. This mathematically prevents high-texture clusters (like trees) from monopolizing tracking attention, forcing feature detection to spread across the entire frame. If `grid_size=1`, the algorithm defaults to searching the entire frame as a single image.
 - **ROI Tracking:** Choose a Region of Interest `(x, y, w, h)` to restrict feature detection to a specific part of the scene.
 - **Mask Frame:** Load a static image (matching the video frame size) to use as a tracking mask. Pixels with a non-zero value are tracked. Pixels equal to zero are ignored.
 - **Coordinate Mapping:** Supports mapping points bidirectionally. Map a point from the stabilized frame back to the original raw frame, or vice versa.
