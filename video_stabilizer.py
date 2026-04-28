@@ -387,6 +387,7 @@ class RealTimeVideoStabilizer:
         m, inliers = cv2.estimateAffinePartial2D(prev_pts_good, curr_pts_good)
 
         if m is None:
+
             self.prev_pts, self.prev_des = self._get_good_features(curr_gray)
             self.initial_feature_count = len(self.prev_pts) if self.prev_pts is not None else 0
             self.prev_gray = curr_gray
@@ -418,9 +419,19 @@ class RealTimeVideoStabilizer:
         else:
             self.prev_pts = curr_pts_good.reshape(-1, 1, 2)
 
-        dx = m[0, 2]
-        dy = m[1, 2]
-        da = np.arctan2(m[1, 0], m[0, 0])
+        # Extract transformations decoupled from the top-left origin.
+        # We calculate how the *center* of the frame moved to decouple rotation from translation.
+        h, w = frame.shape[:2]
+        center_x = w / 2.0
+        center_y = h / 2.0
+
+        c = np.array([center_x, center_y, 1.0])
+        c_new = m.dot(c)
+        dx = c_new[0] - center_x
+        dy = c_new[1] - center_y
+
+        # estimateAffinePartial2D maps p1 -> p2, but its angle sign is inverted relative to getRotationMatrix2D
+        da = -np.arctan2(m[1, 0], m[0, 0])
 
         self.x += dx
         self.y += dy
@@ -452,6 +463,8 @@ class RealTimeVideoStabilizer:
         M[1, 2] += diff_y
 
         self.current_M = M.copy()
+        #print(f"dx: {dx}, dy: {dy}, da: {da}")
+        #print(f"diff_x: {diff_x}, diff_y: {diff_y}, diff_a: {diff_a}")
 
         stabilized_frame = cv2.warpAffine(out_frame, M, (w, h))
 
