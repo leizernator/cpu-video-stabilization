@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 class RealTimeVideoStabilizer:
-    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1):
+    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1, translation_limit=None):
         """
         Real-time video stabilizer using feature tracking and Kalman Filter dynamic modeling.
 
@@ -27,6 +27,9 @@ class RealTimeVideoStabilizer:
                             a full re-detection of features on the frame.
             grid_size: An integer (default 1). If > 1, splits the frame into a `grid_size x grid_size`
                        grid to search for features independently per tile. Helps spread features out.
+            translation_limit: A float between 0.0 and 1.0, or None (default). If set, limits the maximum
+                               correction translation to this percentage of the frame's width/height.
+                               For example, 0.15 limits stabilization shifting to 15% of the frame.
         """
         self.smoothing_factor = max(0.001, min(1.0, float(smoothing_factor)))
         self.roi = roi
@@ -35,6 +38,9 @@ class RealTimeVideoStabilizer:
         self.extractor_type = extractor_type
         self.loss_threshold = max(0.01, min(1.0, float(loss_threshold)))
         self.grid_size = max(1, int(grid_size))
+        self.translation_limit = float(translation_limit) if translation_limit is not None else None
+        if self.translation_limit is not None:
+            self.translation_limit = max(0.0, min(1.0, self.translation_limit))
 
         # Configure complexity parameters based on scale 1 to 10
         complexity = max(1, min(10, int(complexity)))
@@ -450,6 +456,7 @@ class RealTimeVideoStabilizer:
         smoothed_a = self.kalman.statePost[2, 0]
 
         # Difference
+
         diff_x = smoothed_x - self.x
         diff_y = smoothed_y - self.y
         diff_a = smoothed_a - self.a
@@ -458,12 +465,18 @@ class RealTimeVideoStabilizer:
         center_x = w / 2
         center_y = h / 2
 
+        if self.translation_limit is not None:
+            max_dx = w * self.translation_limit
+            max_dy = h * self.translation_limit
+            diff_x = np.clip(diff_x, -max_dx, max_dx)
+            diff_y = np.clip(diff_y, -max_dy, max_dy)
+
         M = cv2.getRotationMatrix2D((center_x, center_y), np.degrees(diff_a), 1.0)
         M[0, 2] += diff_x
         M[1, 2] += diff_y
 
         self.current_M = M.copy()
-        #print(f"dx: {dx}, dy: {dy}, da: {da}")
+        #
         #print(f"diff_x: {diff_x}, diff_y: {diff_y}, diff_a: {diff_a}")
 
         stabilized_frame = cv2.warpAffine(out_frame, M, (w, h))
@@ -487,7 +500,7 @@ class RealTimeVideoStabilizer:
         orig_pt = inv_M.dot(pt)
         return orig_pt[0], orig_pt[1]
 
-def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1):
+def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5, roi=None, mask_path=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1, translation_limit=None):
     """
     Receives a recorded video and saves a stabilized version of it.
     """
@@ -516,7 +529,8 @@ def stabilize_video(input_path, output_path, smoothing_factor=0.1, complexity=5,
         debug=debug,
         extractor_type=extractor_type,
         loss_threshold=loss_threshold,
-        grid_size=grid_size
+        grid_size=grid_size,
+        translation_limit=translation_limit
     )
 
     while True:
