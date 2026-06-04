@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 class RealTimeVideoStabilizer:
-    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1, translation_limit=None):
+    def __init__(self, smoothing_factor=0.1, complexity=5, roi=None, mask_frame=None, debug=False, extractor_type='shi_tomasi', loss_threshold=0.5, grid_size=1, translation_limit=None, fov=None, focal_length=None):
         """
         Real-time video stabilizer using feature tracking and Kalman Filter dynamic modeling.
 
@@ -30,6 +30,10 @@ class RealTimeVideoStabilizer:
             translation_limit: A float between 0.0 and 1.0, or None (default). If set, limits the maximum
                                correction translation to this percentage of the frame's width/height.
                                For example, 0.15 limits stabilization shifting to 15% of the frame.
+            fov: Optional float representing the diagonal field of view in degrees.
+                 Used to approximate focal length for 6 DOF movement estimation.
+            focal_length: Optional float representing the camera's focal length in pixels.
+                          If provided, takes precedence over fov. Used for 6 DOF movement estimation.
         """
         self.smoothing_factor = max(0.001, min(1.0, float(smoothing_factor)))
         self.roi = roi
@@ -116,6 +120,13 @@ class RealTimeVideoStabilizer:
         self.is_first_frame = True
         self.current_M = None
         self.current_frame_shape = None
+
+        self.fov = fov
+        self.focal_length = focal_length
+        self.movement_6dof = {
+            'scene': {'tx': 0.0, 'ty': 0.0, 'tz': 0.0, 'rx': 0.0, 'ry': 0.0, 'rz': 0.0},
+            'camera': {'tx': 0.0, 'ty': 0.0, 'tz': 0.0, 'rx': 0.0, 'ry': 0.0, 'rz': 0.0}
+        }
 
     def set_roi(self, roi):
         """
@@ -402,6 +413,53 @@ class RealTimeVideoStabilizer:
         # Filter actively tracked points to only keep inliers determined by estimateAffinePartial2D
         inliers_idx = np.where(inliers == 1)[0]
         curr_pts_good = curr_pts_good[inliers_idx]
+        prev_pts_inliers = prev_pts_good[inliers_idx]
+
+        # --- 6 DOF Movement Calculation ---
+        h, w = frame.shape[:2]
+        cx, cy = w / 2.0, h / 2.0
+
+        # Approximate focal length
+        if self.focal_length is not None:
+            f = self.focal_length
+        elif self.fov is not None:
+            diagonal = np.sqrt(w**2 + h**2)
+            f = diagonal / (2.0 * np.tan(np.radians(self.fov) / 2.0))
+        else:
+            f = w  # Default assumption if none provided
+
+        camera_matrix = np.array([[f, 0, cx],
+                                  [0, f, cy],
+                                  [0, 0, 1]], dtype=np.float64)
+
+        if len(prev_pts_inliers) >= 5:
+            # Find essential matrix and recover pose
+            E, _ = cv2.findEssentialMat(prev_pts_inliers, curr_pts_good, camera_matrix)
+            if E is not None and E.shape == (3, 3):
+                _, R, t, _ = cv2.recoverPose(E, prev_pts_inliers, curr_pts_good, camera_matrix)
+
+                # Scene movement
+                angles_scene, _, _, _, _, _ = cv2.RQDecomp3x3(R)
+                self.movement_6dof['scene'] = {
+                    'tx': float(t[0, 0]), 'ty': float(t[1, 0]), 'tz': float(t[2, 0]),
+                    'rx': angles_scene[0], 'ry': angles_scene[1], 'rz': angles_scene[2]
+                }
+
+                # Camera movement (inverse of scene movement)
+                R_cam = R.T
+                t_cam = -R_cam @ t
+                angles_cam, _, _, _, _, _ = cv2.RQDecomp3x3(R_cam)
+                self.movement_6dof['camera'] = {
+                    'tx': float(t_cam[0, 0]), 'ty': float(t_cam[1, 0]), 'tz': float(t_cam[2, 0]),
+                    'rx': angles_cam[0], 'ry': angles_cam[1], 'rz': angles_cam[2]
+                }
+        else:
+            # Not enough points for 6 DOF
+            self.movement_6dof = {
+                'scene': {'tx': 0.0, 'ty': 0.0, 'tz': 0.0, 'rx': 0.0, 'ry': 0.0, 'rz': 0.0},
+                'camera': {'tx': 0.0, 'ty': 0.0, 'tz': 0.0, 'rx': 0.0, 'ry': 0.0, 'rz': 0.0}
+            }
+        # ----------------------------------
 
         if self.extractor_type == 'orb' and curr_des is not None:
             # We extract ONLY the inliers from the current keypoints and descriptors.
@@ -484,6 +542,24 @@ class RealTimeVideoStabilizer:
         self.prev_gray = curr_gray
 
         return stabilized_frame
+
+    def get_movement(self, camera=True):
+        """
+        Retrieves the 6 Degrees of Freedom (DOF) movement calculated between the previous frame and the current frame.
+
+        Args:
+            camera (bool): If True (default), returns the estimated movement of the camera.
+                           If False, returns the estimated movement of the scene.
+
+        Returns:
+            dict: A dictionary containing the translation direction ('tx', 'ty', 'tz') and
+                  rotation angles in degrees ('rx', 'ry', 'rz'). Returns zeros if movement
+                  could not be calculated.
+        """
+        if camera:
+            return self.movement_6dof['camera'].copy()
+        else:
+            return self.movement_6dof['scene'].copy()
 
     def get_stabilized_coordinates(self, orig_x, orig_y):
         if self.current_M is None:
